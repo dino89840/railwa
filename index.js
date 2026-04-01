@@ -8,7 +8,7 @@ const log = (...args) => console.log(...args);
 const err = (...args) => console.error(...args);
 
 // --- Configuration ---
-const uuid = (process.env.UUID || 'd342d11e-d424-4583-b36e-524ab1f0afa4').replace(/-/g, '');
+const uuid = (process.env.UUID || '').replace(/-/g, '');
 const port = process.env.PORT || 8080;
 const VLESS_PASS = process.env.VLESS_PASS || 'admin123';
 
