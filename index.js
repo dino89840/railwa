@@ -97,7 +97,6 @@ const landingPageHTML = `<!DOCTYPE html>
                     if (p.x < 0 || p.x > w) p.dx *= -1;
                     if (p.y < 0 || p.y > h) p.dy *= -1;
                 });
-                // draw lines between close particles
                 for (let i = 0; i < particles.length; i++) {
                     for (let j = i+1; j < particles.length; j++) {
                         const dx = particles[i].x - particles[j].x;
@@ -126,23 +125,16 @@ const landingPageHTML = `<!DOCTYPE html>
             renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
             container.appendChild(renderer.domElement);
 
-            // Torus Knot with wireframe
             const geometry = new THREE.TorusKnotGeometry(3, 0.8, 200, 32, 3, 5);
-            const material = new THREE.MeshBasicMaterial({
-                color: 0x6677ee, wireframe: true, transparent: true, opacity: 0.3
-            });
+            const material = new THREE.MeshBasicMaterial({ color: 0x6677ee, wireframe: true, transparent: true, opacity: 0.3 });
             const torusKnot = new THREE.Mesh(geometry, material);
             scene.add(torusKnot);
 
-            // Inner glowing sphere
             const sphereGeo = new THREE.IcosahedronGeometry(1.8, 4);
-            const sphereMat = new THREE.MeshBasicMaterial({
-                color: 0xaa55ff, wireframe: true, transparent: true, opacity: 0.15
-            });
+            const sphereMat = new THREE.MeshBasicMaterial({ color: 0xaa55ff, wireframe: true, transparent: true, opacity: 0.15 });
             const sphere = new THREE.Mesh(sphereGeo, sphereMat);
             scene.add(sphere);
 
-            // Outer ring
             const ringGeo = new THREE.TorusGeometry(5, 0.05, 16, 100);
             const ringMat = new THREE.MeshBasicMaterial({ color: 0xf093fb, transparent: true, opacity: 0.4 });
             const ring = new THREE.Mesh(ringGeo, ringMat);
@@ -186,7 +178,6 @@ const landingPageHTML = `<!DOCTYPE html>
             animate();
         })();
 
-        // Uptime counter
         let startTime = Date.now();
         setInterval(() => {
             document.getElementById('uptime').textContent = Math.floor((Date.now() - startTime) / 1000);
@@ -210,7 +201,6 @@ const vlessConfigPageHTML = `<!DOCTYPE html>
     </style>
 </head>
 <body class="bg-gradient-to-br from-gray-900 to-gray-800 min-h-screen flex items-center justify-center p-4">
-    <!-- Password Gate -->
     <div id="authGate" class="bg-white p-8 rounded-lg shadow-xl max-w-sm w-full text-center">
         <h1 class="text-2xl font-bold text-gray-800 mb-2">Authentication Required</h1>
         <p class="text-sm text-gray-500 mb-6">Enter password to access VLESS configuration.</p>
@@ -223,7 +213,6 @@ const vlessConfigPageHTML = `<!DOCTYPE html>
         <p id="authError" class="text-red-500 text-sm mt-3 hidden">Incorrect password. Try again.</p>
     </div>
 
-    <!-- Config Panel (hidden until authenticated) -->
     <div id="configPanel" class="hidden bg-white p-8 rounded-lg shadow-xl max-w-xl w-full text-center">
         <h1 class="text-3xl font-bold text-gray-800 mb-4">VLESS Configuration</h1>
         <div class="bg-gray-100 p-6 rounded-md mb-6 text-left">
@@ -275,7 +264,8 @@ const vlessConfigPageHTML = `<!DOCTYPE html>
                         document.getElementById('modalUuid').textContent = serverUuid;
                         document.getElementById('modalHost').textContent = serverHost;
 
-                        const uri = \`vless://\${serverUuid}@\${serverHost}:443?security=tls&fp=randomized&type=ws&host=\${serverHost}&encryption=none#Nothflank-By-ModsBots\`;
+                        // Updated URI to include an example of proxyip path
+                        const uri = \`vless://\${serverUuid}@\${serverHost}:443?security=tls&fp=randomized&type=ws&host=\${serverHost}&path=%2F%3Fproxyip%3DYOUR_PROXY_IP_HERE&encryption=none#ProxyIP-Node\`;
                         vlessUri.value = uri;
                     } else {
                         authError.classList.remove('hidden');
@@ -319,17 +309,14 @@ const vlessConfigPageHeaders = {
 const server = http.createServer((req, res) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
 
-    // Root path → 3D landing page
     if (req.method === 'GET' && url.pathname === '/') {
         res.writeHead(200, landingPageHeaders);
         res.end(landingPageHTML);
     }
-    // VLESS config page (password-gated UI)
     else if (req.method === 'GET' && url.pathname === '/vless-config') {
         res.writeHead(200, vlessConfigPageHeaders);
         res.end(vlessConfigPageHTML);
     }
-    // Password verification endpoint
     else if (req.method === 'POST' && url.pathname === '/vless-auth') {
         let body = '';
         req.on('data', chunk => { body += chunk; });
@@ -349,14 +336,13 @@ const server = http.createServer((req, res) => {
             }
         });
     }
-    // Legacy check endpoint (kept for compatibility)
     else if (req.method === 'GET' && url.searchParams.get('check') === 'VLESS__CONFIG') {
         const hostname = req.headers.host.split(':')[0];
         const vlessConfig = {
             uuid: uuid,
             port: port,
             host: hostname,
-            vless_uri: `vless://${uuid}@${hostname}:443?security=tls&fp=randomized&type=ws&host=${hostname}&encryption=none#Nothflank-By-ModsBots`
+            vless_uri: `vless://${uuid}@${hostname}:443?security=tls&fp=randomized&type=ws&host=${hostname}&path=%2F%3Fproxyip%3DYOUR_PROXY_IP_HERE&encryption=none#ProxyIP-Node`
         };
         const respBody = JSON.stringify(vlessConfig);
         res.writeHead(200, {
@@ -379,18 +365,25 @@ const wss = new WebSocket.Server({
     skipUTF8Validation: true
 });
 
-// Handle HTTP upgrade to WebSocket
 server.on('upgrade', (request, socket, head) => {
     wss.handleUpgrade(request, socket, head, (ws) => {
+        // ws အပြင် request (req) ကိုပါ connection event ထဲ တွဲပို့ပေးသည်
         wss.emit('connection', ws, request);
     });
 });
 
-// --- Reusable TextDecoder instance (avoid creating per connection) ---
 const textDecoder = new TextDecoder();
 
-// --- WebSocket Connection Handler (VLESS Proxy Logic - unchanged behavior) ---
-wss.on('connection', (ws) => {
+// --- WebSocket Connection Handler (Proxy IP Logic ထည့်သွင်းထားသည်) ---
+wss.on('connection', (ws, req) => {
+    
+    // URL ကနေ proxyip parameter ကို ဆွဲထုတ်ခြင်း
+    let proxyIP = null;
+    if (req.url && req.url.includes('?')) {
+        const urlParams = new URLSearchParams(req.url.split('?')[1]);
+        proxyIP = urlParams.get('proxyip');
+    }
+
     let cleaned = false;
     let targetSocket = null;
 
@@ -435,17 +428,22 @@ wss.on('connection', (ws) => {
             return;
         }
 
-        log('conn:', host, targetPort);
-
         ws.send(new Uint8Array([VERSION, 0]));
 
         const duplex = createWebSocketStream(ws, {
             highWaterMark: 64 * 1024
         });
 
+        // --- Proxy IP Relay Logic ---
+        // proxyip ပါလာရင် အဲ့ဒီ proxy ip ဆီကိုသွားမယ်၊ မပါရင် client တောင်းတဲ့ မူလ host ဆီကို တိုက်ရိုက်သွားမယ်
+        const connectHost = proxyIP || host;
+        const connectPort = proxyIP ? 443 : targetPort; 
+
+        log(`[INFO] ProxyIP: ${proxyIP ? 'Active ('+proxyIP+')' : 'None'} | Target: ${host}:${targetPort} -> Routing to: ${connectHost}:${connectPort}`);
+
         targetSocket = net.connect({
-            host,
-            port: targetPort,
+            host: connectHost,
+            port: connectPort,
             noDelay: true,
             keepAlive: true,
             keepAliveInitialDelay: 30000,
@@ -463,7 +461,7 @@ wss.on('connection', (ws) => {
         });
 
         targetSocket.on('error', (e) => {
-            err('Conn-Err:', host, targetPort, e.message);
+            err('Conn-Err:', connectHost, connectPort, e.message);
             cleanup();
         });
 
