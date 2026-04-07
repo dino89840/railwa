@@ -264,8 +264,9 @@ const vlessConfigPageHTML = `<!DOCTYPE html>
                         document.getElementById('modalUuid').textContent = serverUuid;
                         document.getElementById('modalHost').textContent = serverHost;
 
-                        // Updated URI to include an example of proxyip path
-                        const uri = \`vless://\${serverUuid}@\${serverHost}:443?security=tls&fp=randomized&type=ws&host=\${serverHost}&path=%2F%3Fproxyip%3DYOUR_PROXY_IP_HERE&encryption=none#ProxyIP-Node\`;
+                        // Example URI using SOCKS5 path format
+                        const examplePath = encodeURIComponent("/?proxyip=user:123456@47.81.15.95:1080");
+                        const uri = \`vless://\${serverUuid}@\${serverHost}:443?security=tls&fp=randomized&type=ws&host=\${serverHost}&path=\${examplePath}&encryption=none#VLESS-Socks5-Node\`;
                         vlessUri.value = uri;
                     } else {
                         authError.classList.remove('hidden');
@@ -292,18 +293,8 @@ const vlessConfigPageHTML = `<!DOCTYPE html>
 </body>
 </html>`;
 
-// Pre-compute response headers
-const landingPageHeaders = {
-    'Content-Type': 'text/html',
-    'Cache-Control': 'public, max-age=3600',
-    'Content-Length': Buffer.byteLength(landingPageHTML)
-};
-
-const vlessConfigPageHeaders = {
-    'Content-Type': 'text/html',
-    'Cache-Control': 'no-store',
-    'Content-Length': Buffer.byteLength(vlessConfigPageHTML)
-};
+const landingPageHeaders = { 'Content-Type': 'text/html', 'Cache-Control': 'public, max-age=3600', 'Content-Length': Buffer.byteLength(landingPageHTML) };
+const vlessConfigPageHeaders = { 'Content-Type': 'text/html', 'Cache-Control': 'no-store', 'Content-Length': Buffer.byteLength(vlessConfigPageHTML) };
 
 // --- HTTP Server ---
 const server = http.createServer((req, res) => {
@@ -312,12 +303,10 @@ const server = http.createServer((req, res) => {
     if (req.method === 'GET' && url.pathname === '/') {
         res.writeHead(200, landingPageHeaders);
         res.end(landingPageHTML);
-    }
-    else if (req.method === 'GET' && url.pathname === '/vless-config') {
+    } else if (req.method === 'GET' && url.pathname === '/vless-config') {
         res.writeHead(200, vlessConfigPageHeaders);
         res.end(vlessConfigPageHTML);
-    }
-    else if (req.method === 'POST' && url.pathname === '/vless-auth') {
+    } else if (req.method === 'POST' && url.pathname === '/vless-auth') {
         let body = '';
         req.on('data', chunk => { body += chunk; });
         req.on('end', () => {
@@ -335,29 +324,13 @@ const server = http.createServer((req, res) => {
                 res.end(JSON.stringify({ success: false, error: 'Bad request' }));
             }
         });
-    }
-    else if (req.method === 'GET' && url.searchParams.get('check') === 'VLESS__CONFIG') {
-        const hostname = req.headers.host.split(':')[0];
-        const vlessConfig = {
-            uuid: uuid,
-            port: port,
-            host: hostname,
-            vless_uri: `vless://${uuid}@${hostname}:443?security=tls&fp=randomized&type=ws&host=${hostname}&path=%2F%3Fproxyip%3DYOUR_PROXY_IP_HERE&encryption=none#ProxyIP-Node`
-        };
-        const respBody = JSON.stringify(vlessConfig);
-        res.writeHead(200, {
-            'Content-Type': 'application/json',
-            'Content-Length': Buffer.byteLength(respBody)
-        });
-        res.end(respBody);
-    }
-    else {
+    } else {
         res.writeHead(404, { 'Content-Type': 'text/plain' });
         res.end('Not Found');
     }
 });
 
-// --- WebSocket Server with performance options ---
+// --- WebSocket Server ---
 const wss = new WebSocket.Server({
     noServer: true,
     perMessageDeflate: false,
@@ -367,21 +340,83 @@ const wss = new WebSocket.Server({
 
 server.on('upgrade', (request, socket, head) => {
     wss.handleUpgrade(request, socket, head, (ws) => {
-        // ws အပြင် request (req) ကိုပါ connection event ထဲ တွဲပို့ပေးသည်
         wss.emit('connection', ws, request);
     });
 });
 
 const textDecoder = new TextDecoder();
 
-// --- WebSocket Connection Handler (Proxy IP Logic ထည့်သွင်းထားသည်) ---
+// --- SOCKS5 Proxy ချိတ်ဆက်ပေးမည့် Function ---
+function connectSocks5(proxyIP, proxyPort, username, password, targetHost, targetPort, onReady, onError) {
+    const socket = net.connect({ host: proxyIP, port: proxyPort });
+    let step = 0;
+
+    socket.on('error', onError);
+
+    socket.on('data', (data) => {
+        if (step === 0) {
+            if (data[0] === 0x05 && data[1] === 0x02 && username) { 
+                // Server accepted Auth Method 0x02
+                step = 1;
+                const uBuf = Buffer.from(username);
+                const pBuf = Buffer.from(password);
+                socket.write(Buffer.concat([Buffer.from([0x01, uBuf.length]), uBuf, Buffer.from([pBuf.length]), pBuf]));
+            } else if (data[0] === 0x05 && data[1] === 0x00) { 
+                // Server accepted No-Auth
+                step = 2;
+                sendConnectRequest();
+            } else {
+                onError(new Error("SOCKS5 Method Not Supported"));
+                socket.destroy();
+            }
+        } else if (step === 1) {
+            // Auth Response
+            if (data[0] === 0x01 && data[1] === 0x00) {
+                step = 2;
+                sendConnectRequest();
+            } else {
+                onError(new Error("SOCKS5 Authentication Failed"));
+                socket.destroy();
+            }
+        } else if (step === 2) {
+            // Connect Response
+            if (data[0] === 0x05 && data[1] === 0x00) {
+                socket.removeAllListeners('data');
+                onReady(socket); // Ready to pipe VLESS Payload
+            } else {
+                onError(new Error("SOCKS5 Connection to Target Failed"));
+                socket.destroy();
+            }
+        }
+    });
+
+    function sendConnectRequest() {
+        const portBuf = Buffer.alloc(2);
+        portBuf.writeUInt16BE(targetPort, 0);
+        const hostBuf = Buffer.from(targetHost);
+        socket.write(Buffer.concat([Buffer.from([0x05, 0x01, 0x00, 0x03, hostBuf.length]), hostBuf, portBuf]));
+    }
+
+    socket.on('connect', () => {
+        // Hello Packet (Offer Auth: 0x02 and No-Auth: 0x00)
+        if (username && password) {
+            socket.write(Buffer.from([0x05, 0x01, 0x02]));
+        } else {
+            socket.write(Buffer.from([0x05, 0x01, 0x00]));
+        }
+    });
+
+    return socket;
+}
+
+// --- WebSocket Connection Handler ---
 wss.on('connection', (ws, req) => {
     
-    // URL ကနေ proxyip parameter ကို ဆွဲထုတ်ခြင်း
-    let proxyIP = null;
+    // URL ထဲက proxyip ကို ဖတ်ယူခြင်း
+    let proxyParam = null;
     if (req.url && req.url.includes('?')) {
         const urlParams = new URLSearchParams(req.url.split('?')[1]);
-        proxyIP = urlParams.get('proxyip');
+        proxyParam = urlParams.get('proxyip');
     }
 
     let cleaned = false;
@@ -395,19 +430,13 @@ wss.on('connection', (ws, req) => {
     };
 
     ws.on('close', cleanup);
-    ws.on('error', (e) => {
-        err('WS-Err:', e.message);
-        cleanup();
-    });
+    ws.on('error', (e) => { err('WS-Err:', e.message); cleanup(); });
 
     ws.once('message', (msg) => {
         const [VERSION] = msg;
         const id = msg.slice(1, 17);
 
-        if (!id.every((v, i) => v === uuidBytes[i])) {
-            ws.close();
-            return;
-        }
+        if (!id.every((v, i) => v === uuidBytes[i])) { ws.close(); return; }
 
         let i = msg.slice(17, 18).readUInt8() + 19;
         const targetPort = msg.slice(i, i += 2).readUInt16BE(0);
@@ -424,58 +453,63 @@ wss.on('connection', (ws, req) => {
                 .map(b => b.readUInt16BE(0).toString(16))
                 .join(':');
         } else {
-            ws.close();
-            return;
+            ws.close(); return;
         }
 
         ws.send(new Uint8Array([VERSION, 0]));
 
-        const duplex = createWebSocketStream(ws, {
-            highWaterMark: 64 * 1024
-        });
+        const duplex = createWebSocketStream(ws, { highWaterMark: 64 * 1024 });
 
-        // --- Proxy IP Relay Logic ---
-        // proxyip ပါလာရင် အဲ့ဒီ proxy ip ဆီကိုသွားမယ်၊ မပါရင် client တောင်းတဲ့ မူလ host ဆီကို တိုက်ရိုက်သွားမယ်
-        const connectHost = proxyIP || host;
-        const connectPort = proxyIP ? 443 : targetPort; 
+        // --- Proxy Routing Logic ---
+        if (proxyParam) {
+            // Parse proxy param: user:123456@47.81.15.95:1080 သို့မဟုတ် 47.81.15.95:1080
+            let proxyUser = '', proxyPass = '', proxyIP = '', proxyPort = 1080;
 
-        log(`[INFO] ProxyIP: ${proxyIP ? 'Active ('+proxyIP+')' : 'None'} | Target: ${host}:${targetPort} -> Routing to: ${connectHost}:${connectPort}`);
+            if (proxyParam.includes('@')) {
+                const [authPart, serverPart] = proxyParam.split('@');
+                [proxyUser, proxyPass] = authPart.split(':');
+                [proxyIP, proxyPort] = serverPart.split(':');
+            } else if (proxyParam.includes(':')) {
+                [proxyIP, proxyPort] = proxyParam.split(':');
+            } else {
+                proxyIP = proxyParam;
+            }
 
-        targetSocket = net.connect({
-            host: connectHost,
-            port: connectPort,
-            noDelay: true,
-            keepAlive: true,
-            keepAliveInitialDelay: 30000,
-            allowHalfOpen: true,
-            highWaterMark: 64 * 1024
-        }, function () {
-            this.write(msg.slice(i));
-            duplex.on('error', (e) => {
-                err('E1:', e.message);
-                cleanup();
-            }).pipe(this).on('error', (e) => {
-                err('E2:', e.message);
-                cleanup();
-            }).pipe(duplex);
-        });
+            log(`[SOCKS5] Routing via ${proxyIP}:${proxyPort} to target ${host}:${targetPort}`);
 
-        targetSocket.on('error', (e) => {
-            err('Conn-Err:', connectHost, connectPort, e.message);
-            cleanup();
-        });
+            targetSocket = connectSocks5(
+                proxyIP, parseInt(proxyPort), proxyUser, proxyPass, host, targetPort,
+                // On Ready
+                (socket) => {
+                    socket.write(msg.slice(i)); // Write VLESS Payload
+                    duplex.on('error', cleanup).pipe(socket).on('error', cleanup).pipe(duplex);
+                },
+                // On Error
+                (e) => {
+                    err(`[SOCKS5] Error: ${e.message}`);
+                    cleanup();
+                }
+            );
 
-        targetSocket.on('close', () => {
-            try { if (!duplex.destroyed) duplex.destroy(); } catch (_) {}
-        });
+        } else {
+            // တိုက်ရိုက်ချိတ်ဆက်ခြင်း (မူလအတိုင်း)
+            log(`[DIRECT] Connecting directly to ${host}:${targetPort}`);
+            targetSocket = net.connect({
+                host, port: targetPort, noDelay: true, keepAlive: true, allowHalfOpen: true
+            }, function () {
+                this.write(msg.slice(i));
+                duplex.on('error', cleanup).pipe(this).on('error', cleanup).pipe(duplex);
+            });
 
-        targetSocket.setTimeout(120000, () => {
-            targetSocket.destroy();
-        });
+            targetSocket.on('error', (e) => { err('Conn-Err:', host, targetPort, e.message); cleanup(); });
+        }
 
-        duplex.on('close', () => {
-            try { if (targetSocket && !targetSocket.destroyed) targetSocket.destroy(); } catch (_) {}
-        });
+        if (targetSocket) {
+            targetSocket.on('close', () => { try { if (!duplex.destroyed) duplex.destroy(); } catch (_) {} });
+            targetSocket.setTimeout(120000, () => { targetSocket.destroy(); });
+        }
+
+        duplex.on('close', () => { try { if (targetSocket && !targetSocket.destroyed) targetSocket.destroy(); } catch (_) {} });
     });
 });
 
@@ -487,14 +521,6 @@ server.listen(port, '0.0.0.0', 256, () => {
     log('VLESS config page at: http://localhost:' + port + '/vless-config');
 });
 
-server.on('error', (e) => {
-    err('Server Error:', e);
-});
-
-process.on('uncaughtException', (e) => {
-    err('Uncaught Exception:', e.message);
-});
-
-process.on('unhandledRejection', (e) => {
-    err('Unhandled Rejection:', e);
-});
+server.on('error', (e) => { err('Server Error:', e); });
+process.on('uncaughtException', (e) => { err('Uncaught Exception:', e.message); });
+process.on('unhandledRejection', (e) => { err('Unhandled Rejection:', e); });
